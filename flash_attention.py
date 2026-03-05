@@ -54,7 +54,8 @@ autotune_configs = [
 
 @triton.autotune(
     configs=autotune_configs,
-    key=["N", "d"],  # re-tune when sequence length or head dim changes
+    key=["N", "d", "causal"],  # re-tune when any of these change — causal/non-causal
+                               # have different loop counts so they need separate tuning
 )
 @triton.jit
 def _flash_attn_forward_kernel(
@@ -70,6 +71,9 @@ def _flash_attn_forward_kernel(
     N: tl.constexpr,          # sequence length
     d: tl.constexpr,          # head dimension
     scale,                    # 1 / sqrt(d) — passed in to avoid computing in kernel
+    causal: tl.constexpr,     # NEW: whether to apply causal (lower-triangle) masking
+                              # tl.constexpr means triton compiles two separate kernels —
+                              # one for causal=True, one for False — zero runtime overhead
     BLOCK_M: tl.constexpr,    # rows of Q per program instance
     BLOCK_N: tl.constexpr,    # rows of K/V per inner loop step
 ):
