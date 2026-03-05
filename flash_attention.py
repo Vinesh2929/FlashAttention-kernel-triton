@@ -118,7 +118,15 @@ def _flash_attn_forward_kernel(
 
     # inner loop: iterate over K and V blocks
     # for each K/V block, compute scores, update running stats, accumulate output
-    num_blocks_n = tl.cdiv(N, BLOCK_N)  # how many K/V blocks to process
+    #
+    # causal mode cuts the loop roughly in half — row i can only attend to j <= i
+    # the furthest column any Q row in this block can attend to is q_start + BLOCK_M - 1
+    # so any kv block starting beyond that column is pure upper-triangle: all -inf, skip it
+    # for a long sequence this is ~half the inner loop iterations just gone for free
+    if causal:
+        num_blocks_n = tl.cdiv(q_start + BLOCK_M, BLOCK_N)
+    else:
+        num_blocks_n = tl.cdiv(N, BLOCK_N)
 
     for block_n in range(num_blocks_n):
         kv_start = block_n * BLOCK_N
