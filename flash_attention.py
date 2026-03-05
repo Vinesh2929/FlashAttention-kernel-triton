@@ -151,6 +151,18 @@ def _flash_attn_forward_kernel(
         col_mask = offs_n[None, :] < N  # (1, BLOCK_N)
         S = tl.where(col_mask, S, float("-inf"))
 
+        # causal mask — within each tile, zero out positions where j > i
+        # the tile-skipping above already eliminated fully upper-triangle blocks,
+        # but the "diagonal" tile (where kv_start <= q_start < kv_start + BLOCK_N)
+        # is a mix: some (i, j) pairs are valid and some aren't
+        # this per-element mask handles that boundary correctly
+        # since causal is tl.constexpr, this whole branch is compiled away for non-causal
+        if causal:
+            # offs_m[i] is the absolute row position, offs_n[j] is the absolute col position
+            # we want to keep j <= i, so mask out j > i
+            causal_mask = offs_n[None, :] <= offs_m[:, None]  # (BLOCK_M, BLOCK_N)
+            S = tl.where(causal_mask, S, float("-inf"))
+
         # online softmax update
         # m_new = max(m_old, rowmax(S))
         m_new = tl.maximum(m_block, tl.max(S, axis=1))  # (BLOCK_M,)
