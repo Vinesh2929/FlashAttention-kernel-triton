@@ -110,13 +110,29 @@ def run_benchmark():
             naive_mem_mb  = float("nan")
             naive_tflops  = float("nan")
 
-        # --- flash attention ---
+        # --- flash attention (non-causal) ---
         flash_time_ms = triton.testing.do_bench(
             lambda: flash_attention(Q, K, V),
             warmup=WARMUP, rep=REP,
         )
         flash_mem_mb = measure_memory_mb(flash_attention, (Q, K, V))
         flash_tflops = (flops_attention(N, HEAD_DIM) / flash_time_ms / 1e9)
+
+        # --- flash attention (causal) ---
+        # causal skips upper-triangle kv blocks entirely, so effective FLOPs are ~half
+        # we still compute TFLOPS using the full 4*N^2*d formula so we can see
+        # how much less time it takes despite "doing the same work" — the savings
+        # are real compute savings, not just redefined math
+        flash_causal_time_ms = triton.testing.do_bench(
+            lambda: flash_attention(Q, K, V, causal=True),
+            warmup=WARMUP, rep=REP,
+        )
+        flash_causal_mem_mb = measure_memory_mb(
+            lambda q, k, v: flash_attention(q, k, v, causal=True),
+            (Q, K, V),
+        )
+        # for causal, actual compute is ~half so TFLOPS using half-flops is fairer
+        flash_causal_tflops = (flops_attention(N, HEAD_DIM) / 2.0 / flash_causal_time_ms / 1e9)
 
         # --- torch SDPA ---
         # torch's built-in scaled_dot_product_attention — may use FlashAttention
@@ -133,16 +149,19 @@ def run_benchmark():
         sdpa_tflops = (flops_attention(N, HEAD_DIM) / sdpa_time_ms / 1e9)
 
         results.append({
-            "N":             N,
-            "naive_ms":      naive_time_ms,
-            "naive_mb":      naive_mem_mb,
-            "naive_tflops":  naive_tflops,
-            "flash_ms":      flash_time_ms,
-            "flash_mb":      flash_mem_mb,
-            "flash_tflops":  flash_tflops,
-            "sdpa_ms":       sdpa_time_ms,
-            "sdpa_mb":       sdpa_mem_mb,
-            "sdpa_tflops":   sdpa_tflops,
+            "N":                    N,
+            "naive_ms":             naive_time_ms,
+            "naive_mb":             naive_mem_mb,
+            "naive_tflops":         naive_tflops,
+            "flash_ms":             flash_time_ms,
+            "flash_mb":             flash_mem_mb,
+            "flash_tflops":         flash_tflops,
+            "flash_causal_ms":      flash_causal_time_ms,
+            "flash_causal_mb":      flash_causal_mem_mb,
+            "flash_causal_tflops":  flash_causal_tflops,
+            "sdpa_ms":              sdpa_time_ms,
+            "sdpa_mb":              sdpa_mem_mb,
+            "sdpa_tflops":          sdpa_tflops,
         })
 
         print("done")
@@ -157,15 +176,17 @@ def print_table(results):
     print()
     header = (
         "| Seq Len "
-        "| Naive (ms) | Naive (MB) | Naive (TFLOPS)"
-        "| Flash (ms) | Flash (MB) | Flash (TFLOPS)"
-        "| SDPA (ms)  | SDPA (MB)  | SDPA (TFLOPS) |"
+        "| Naive (ms) | Naive (MB) | Naive TFLOPS "
+        "| Flash (ms) | Flash (MB) | Flash TFLOPS "
+        "| Causal (ms) | Causal (MB) | Causal TFLOPS "
+        "| SDPA (ms) | SDPA (MB) | SDPA TFLOPS |"
     )
     sep = (
         "|---------|"
-        "------------|------------|---------------|"
-        "------------|------------|---------------|"
         "------------|------------|--------------|"
+        "------------|------------|--------------|"
+        "-------------|-------------|---------------|"
+        "-----------|-----------|-------------|"
     )
     print(header)
     print(sep)
@@ -178,13 +199,14 @@ def print_table(results):
             return f"{v:10.2f}" if not math.isnan(v) else "       OOM"
 
         def fmt_tf(v):
-            return f"{v:13.3f}" if not math.isnan(v) else "        OOM"
+            return f"{v:12.3f}" if not math.isnan(v) else "         OOM"
 
         print(
             f"| {r['N']:7d} "
             f"| {fmt_ms(r['naive_ms'])} | {fmt_mb(r['naive_mb'])} | {fmt_tf(r['naive_tflops'])}"
             f"| {fmt_ms(r['flash_ms'])} | {fmt_mb(r['flash_mb'])} | {fmt_tf(r['flash_tflops'])}"
-            f"| {fmt_ms(r['sdpa_ms'])}  | {fmt_mb(r['sdpa_mb'])}  | {fmt_tf(r['sdpa_tflops'])} |"
+            f"| {fmt_ms(r['flash_causal_ms'])}  | {fmt_mb(r['flash_causal_mb'])}  | {fmt_tf(r['flash_causal_tflops'])}"
+            f"| {fmt_ms(r['sdpa_ms'])} | {fmt_mb(r['sdpa_mb'])} | {fmt_tf(r['sdpa_tflops'])} |"
         )
 
     print()
@@ -193,19 +215,22 @@ def print_table(results):
 def save_plots(results, output_dir="."):
     """Generate and save the two benchmark plots."""
 
-    seq_lens    = [r["N"]           for r in results]
-    naive_mbs   = [r["naive_mb"]    for r in results]
-    flash_mbs   = [r["flash_mb"]    for r in results]
-    sdpa_mbs    = [r["sdpa_mb"]     for r in results]
-    naive_tflops = [r["naive_tflops"] for r in results]
-    flash_tflops = [r["flash_tflops"] for r in results]
-    sdpa_tflops  = [r["sdpa_tflops"]  for r in results]
+    seq_lens           = [r["N"]                   for r in results]
+    naive_mbs          = [r["naive_mb"]             for r in results]
+    flash_mbs          = [r["flash_mb"]             for r in results]
+    flash_causal_mbs   = [r["flash_causal_mb"]      for r in results]
+    sdpa_mbs           = [r["sdpa_mb"]              for r in results]
+    naive_tflops       = [r["naive_tflops"]         for r in results]
+    flash_tflops       = [r["flash_tflops"]         for r in results]
+    flash_causal_tflops = [r["flash_causal_tflops"] for r in results]
+    sdpa_tflops        = [r["sdpa_tflops"]          for r in results]
 
     # --- memory plot ---
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(seq_lens, naive_mbs,  marker="o", label="Naive PyTorch", linewidth=2)
-    ax.plot(seq_lens, flash_mbs,  marker="s", label="FlashAttention (ours)", linewidth=2)
-    ax.plot(seq_lens, sdpa_mbs,   marker="^", label="Torch SDPA", linewidth=2)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(seq_lens, naive_mbs,        marker="o", label="Naive PyTorch",              linewidth=2)
+    ax.plot(seq_lens, flash_mbs,        marker="s", label="FlashAttention (non-causal)", linewidth=2)
+    ax.plot(seq_lens, flash_causal_mbs, marker="D", label="FlashAttention (causal)",     linewidth=2)
+    ax.plot(seq_lens, sdpa_mbs,         marker="^", label="Torch SDPA",                 linewidth=2)
     ax.set_xlabel("Sequence Length", fontsize=12)
     ax.set_ylabel("Peak Memory (MB)", fontsize=12)
     ax.set_title("Attention Memory Usage vs Sequence Length", fontsize=13)
@@ -220,10 +245,13 @@ def save_plots(results, output_dir="."):
     print(f"Saved: {mem_path}")
 
     # --- throughput plot ---
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(seq_lens, naive_tflops,  marker="o", label="Naive PyTorch", linewidth=2)
-    ax.plot(seq_lens, flash_tflops,  marker="s", label="FlashAttention (ours)", linewidth=2)
-    ax.plot(seq_lens, sdpa_tflops,   marker="^", label="Torch SDPA", linewidth=2)
+    # causal TFLOPS uses half-flops formula since it skips the upper triangle
+    # so a higher TFLOPS here means it's genuinely faster, not just doing less work
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(seq_lens, naive_tflops,        marker="o", label="Naive PyTorch",              linewidth=2)
+    ax.plot(seq_lens, flash_tflops,        marker="s", label="FlashAttention (non-causal)", linewidth=2)
+    ax.plot(seq_lens, flash_causal_tflops, marker="D", label="FlashAttention (causal, eff.)", linewidth=2)
+    ax.plot(seq_lens, sdpa_tflops,         marker="^", label="Torch SDPA",                 linewidth=2)
     ax.set_xlabel("Sequence Length", fontsize=12)
     ax.set_ylabel("TFLOPS", fontsize=12)
     ax.set_title("Attention Throughput vs Sequence Length", fontsize=13)
