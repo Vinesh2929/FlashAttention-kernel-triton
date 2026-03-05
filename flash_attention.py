@@ -197,7 +197,12 @@ def _flash_attn_forward_kernel(
     tl.store(O_block_ptr, O_block.to(Q_block.dtype), mask=q_mask)
 
 
-def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
+def flash_attention(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    causal: bool = False,
+) -> torch.Tensor:
     """
     FlashAttention forward pass using the Triton kernel above.
 
@@ -208,6 +213,8 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.
         Q: query tensor, shape (batch, heads, seq_len, head_dim)
         K: key tensor, shape (batch, heads, seq_len, head_dim)
         V: value tensor, shape (batch, heads, seq_len, head_dim)
+        causal: if True, apply causal (lower-triangle) masking — every LLM uses this
+                halves the inner loop work by skipping upper-triangle KV blocks entirely
 
     Returns:
         output tensor, shape (batch, heads, seq_len, head_dim), same dtype as inputs
@@ -234,9 +241,6 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.
     # axis 0 = which Q block, axis 1 = which (batch, head)
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_M"]), batch * heads)
 
-    # flatten batch and heads into a single dimension for the kernel
-    # the kernel uses strides to navigate the actual layout
-    # stride_qh needs to cover one full (seq_len, head_dim) block
     _flash_attn_forward_kernel[grid](
         Q, K, V, O,
         # Q strides
@@ -250,6 +254,7 @@ def flash_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.
         N=N,
         d=d,
         scale=scale,
+        causal=causal,
     )
 
     return O
