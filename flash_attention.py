@@ -21,16 +21,34 @@ import triton.language as tl
 import math
 
 
-# autotune configs — triton will pick whichever runs fastest on the target GPU
-# BLOCK_M is how many Q rows we handle per program instance
-# BLOCK_N is how many K/V rows we process in the inner loop per step
+# autotune configs — triton benchmarks all of these and picks the winner for your GPU
+# BLOCK_M = Q rows per program, BLOCK_N = K/V rows per inner loop step
 # larger blocks = more SRAM usage but better arithmetic intensity
+#
+# num_stages is the big new addition here — it controls software pipelining
+# with num_stages=1 the pattern is: load K tile → wait → compute → load V tile → wait → compute
+# with num_stages=3 triton overlaps the next tile's load with the current tile's compute
+# the GPU doesn't sit idle during memory fetches — it just keeps doing math
+# num_stages=3 is usually the sweet spot; =4 helps when HBM latency is really high
 autotune_configs = [
+    # --- num_stages=2 (light pipelining, small SRAM footprint) ---
     triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64},  num_warps=4, num_stages=2),
     triton.Config({"BLOCK_M": 64,  "BLOCK_N": 32},  num_warps=4, num_stages=2),
     triton.Config({"BLOCK_M": 128, "BLOCK_N": 64},  num_warps=8, num_stages=2),
     triton.Config({"BLOCK_M": 32,  "BLOCK_N": 32},  num_warps=4, num_stages=2),
     triton.Config({"BLOCK_M": 128, "BLOCK_N": 32},  num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 128}, num_warps=8, num_stages=2),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=2),
+    # --- num_stages=3 (deeper pipeline, next tile prefetched during current compute) ---
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64},  num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 32},  num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64},  num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 32,  "BLOCK_N": 64},  num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 32},  num_warps=8, num_stages=3),
+    # --- num_stages=4 (max depth, pays off when memory latency dominates) ---
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64},  num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64},  num_warps=8, num_stages=4),
+    triton.Config({"BLOCK_M": 64,  "BLOCK_N": 32},  num_warps=4, num_stages=4),
 ]
 
 
