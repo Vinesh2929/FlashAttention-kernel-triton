@@ -81,71 +81,33 @@ Tests all combinations of:
 - batch sizes: 1, 2, 4
 - dtypes: float16, float32
 
-Expected output (all 96 tests):
-```
-======================================================================
-FlashAttention correctness tests
-  comparing flash_attention vs naive_attention
-  tolerance: atol=0.01, rtol=0.01
-  device: Tesla T4
-======================================================================
-
---- dtype = float16 ---
-  [PASSED] batch= 1  seq_len=  128  head_dim=  32  dtype=fp16  |  max_diff=1.22e-03
-  [PASSED] batch= 1  seq_len=  128  head_dim=  64  dtype=fp16  |  max_diff=9.77e-04
-  ...
-Results: 96/96 passed, 0 failed
-All tests passed.
-```
+Runs 192 tests total — 96 non-causal (flash vs naive) and 96 causal
+(flash vs torch SDPA). Prints `PASSED` / `FAILED` and max absolute diff for each.
 
 ---
 
 ## Running the benchmark
 
 ```bash
+# baseline: naive vs flash vs torch SDPA
 python benchmark.py
+
+# with causal masking column (adds Flash Causal results + 4th plot line)
+python benchmark.py --causal
 ```
 
-This sweeps sequence lengths [512, 1024, 2048, 4096, 8192] and measures wall-clock
-time, peak memory, and TFLOPS for all three implementations. Saves two plots:
-`memory_usage.png` and `throughput.png`.
+Sweeps sequence lengths [512, 1024, 2048, 4096, 8192], measures wall-clock time,
+peak memory, and TFLOPS. Saves `memory_usage.png` and `throughput.png`.
 
 ---
 
 ## Benchmark results
 
-Results from a Google Colab T4 GPU (16GB HBM), float16, batch=1, heads=1, head_dim=64.
-
-| Seq Len | Naive (ms) | Naive (MB) | Naive (TFLOPS) | Flash (ms) | Flash (MB) | Flash (TFLOPS) | SDPA (ms)  | SDPA (MB)  | SDPA (TFLOPS) |
-|---------|------------|------------|----------------|------------|------------|----------------|------------|------------|---------------|
-|     512 |      0.082 |       0.50 |          0.013 |      0.143 |       0.06 |          0.008 |      0.045 |       0.50 |          0.024 |
-|    1024 |      0.134 |       2.00 |          0.032 |      0.271 |       0.06 |          0.016 |      0.065 |       2.00 |          0.066 |
-|    2048 |      0.380 |       8.00 |          0.045 |      0.744 |       0.06 |          0.023 |      0.146 |       8.00 |          0.118 |
-|    4096 |      1.257 |      32.00 |          0.054 |      2.453 |       0.06 |          0.028 |      0.455 |      32.00 |          0.150 |
-|    8192 |      4.871 |     128.00 |          0.056 |      9.140 |       0.06 |          0.030 |      1.621 |     128.00 |          0.168 |
-
-The memory story is exactly what FlashAttention promises — naive attention's memory
-grows quadratically (0.5 MB at N=512 → 128 MB at N=8192, a 256x increase), while
-flash attention stays nearly flat at ~0.06 MB across all sequence lengths.
-
-On raw speed, torch's SDPA wins — it uses optimized fused kernels (and on Ampere+
-GPUs uses FlashAttention-2 internally). Our Triton kernel is a clean educational
-implementation; production-grade speed would need more tuning (better vectorization,
-smarter prefetching, more autotuning configs).
+> Run `python benchmark.py` on a CUDA GPU and paste results here.
 
 ---
 
 ## Plots
 
-### Memory Usage vs Sequence Length
-![memory usage](memory_usage.png)
-
-The naive curve grows quadratically — that's the `N^2` score matrix.
-FlashAttention stays flat because we never allocate it.
-
-### Throughput (TFLOPS) vs Sequence Length
-![throughput](throughput.png)
-
-Torch SDPA is fastest because it uses highly optimized fused CUDA kernels.
-Our kernel shows the same scaling behavior, just with lower absolute throughput
-due to being a teaching implementation rather than a production one.
+> Run `python benchmark.py` to generate `memory_usage.png` and `throughput.png`,
+> then add them here.
